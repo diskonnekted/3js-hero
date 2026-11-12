@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Daun Terbang &mdash; hero</title>
+<meta name="description" content="Latar foto statis dengan animasi three.js: sekumpulan daun kecil melayang tertiup angin. Cahaya dingin, rim light, grain film.">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #07090a;
+    color: #e8eef1;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ------------------------------------------------------------- hero */
+  .hero {
+    position: relative;
+    height: min(78svh, 760px);
+    min-height: 420px;
+    overflow: hidden;
+    background-color: #05080a;
+    /* cadangan kalau WebGL mati: foto yang sama, tanpa daun */
+    background-image: url(background1.jpg);
+    background-size: cover;
+    background-position: center;
+    isolation: isolate;
+  }
+
+  .hero__canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 1.2s ease;
+  }
+  .hero__canvas.is-ready { opacity: 1; }
+
+  .hero__scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: linear-gradient(90deg,
+      rgba(5, 8, 10, .74) 0%,
+      rgba(5, 8, 10, .30) 52%,
+      rgba(5, 8, 10, 0) 78%);
+  }
+
+  .hero__copy {
+    position: relative;
+    z-index: 2;
+    height: 100%;
+    max-width: 34ch;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 0 clamp(20px, 5vw, 72px) clamp(28px, 7vh, 76px);
+  }
+  .hero__kicker {
+    margin: 0 0 .9em;
+    font-size: 10.5px;
+    letter-spacing: .38em;
+    text-transform: uppercase;
+    color: #a4bac7;
+  }
+  .hero__title {
+    margin: 0;
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400;
+    font-size: clamp(28px, 5vw, 62px);
+    line-height: 1;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #f0f6f9;
+    text-shadow: 0 2px 34px rgba(0, 0, 0, .55);
+  }
+  .hero__rule {
+    width: 46px;
+    height: 1px;
+    margin: 1.15em 0 0;
+    background: #e0a95f;
+  }
+  .hero__sub {
+    margin: 1em 0 0;
+    font-size: clamp(11px, 1.1vw, 13px);
+    letter-spacing: .14em;
+    color: #b9cdd8;
+  }
+
+  /* -------------------------------------------------------- isi di bawah */
+  .after {
+    max-width: 62ch;
+    margin: 0 auto;
+    padding: clamp(32px, 6vh, 72px) clamp(20px, 5vw, 40px) 18vh;
+    font-size: 15px;
+    line-height: 1.85;
+    color: #93a7b2;
+  }
+  .after p { margin: 0 0 1.3em; }
+  .after strong { color: #d7e3e9; font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero__canvas { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<section class="hero" id="hero">
+  <canvas id="stage" class="hero__canvas" aria-hidden="true"></canvas>
+  <div class="hero__scrim" aria-hidden="true"></div>
+  <div class="hero__copy">
+    <p class="hero__kicker">lembar 02 &middot; angin timur</p>
+    <h1 class="hero__title">Daun Terbang</h1>
+    <div class="hero__rule"></div>
+    <p class="hero__sub">kecil-kecil, lepas dari tangkainya</p>
+  </div>
+</section>
+
+<section class="after">
+  <p>Gulir terus. Begitu hero keluar dari layar, <strong>render berhenti total</strong> &mdash;
+     bukan cuma disembunyikan. Jamnya ikut berhenti, jadi tidak ada daun yang melompat
+     jauh saat kamu kembali ke atas.</p>
+  <p>Buka DevTools &rarr; Performance, rekam sambil menggulir ke bagian ini, dan
+     pastikan tidak ada frame baru yang digambar selagi hero tidak terlihat.</p>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var host = document.getElementById('hero');
+
+  // Di hero, kegagalan tidak boleh menutupi apa pun: matikan kanvas saja,
+  // lalu foto CSS di belakangnya yang tampil.
+  function fail(html) {
+    var c = document.getElementById('stage');
+    if (c) c.style.display = 'none';
+    if (window.console) console.warn('[hero] ' + html);
+  }
+
+  if (typeof THREE === 'undefined') {
+    fail('three.js gagal dimuat. Halaman ini mengambil pustaka dari CDN, jadi butuh koneksi internet sekali jalan, sambungkan lalu muat ulang.');
+    return;
+  }
+
+  /* ---------------------------------------------------------------- data */
+  var BG_URL = 'background1.jpg';
+
+  var IMG_W = 2609, IMG_H = 1536;
+
+  /* ------------------------------------------------------------ renderer */
+  var canvas = document.getElementById('stage');
+  var renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas: canvas,
+      antialias: false,
+      alpha: false,
+      stencil: false,
+      powerPreference: 'high-performance'
+    });
+  } catch (e) {
+    fail('WebGL tidak bisa dinyalakan di peramban ini. Coba Chrome, Edge, atau Firefox terbaru dengan akselerasi perangkat keras aktif.');
+    return;
+  }
+
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.setClearColor(0x000000, 0);
+
+  var DPR = Math.min(window.devicePixelRatio || 1, 1.75);
+  var REDUCED = window.matchMedia
+    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    : false;
+
+  /* -------------------------------------------------------------- camera */
+  var FOV = 32;
+  var TAN_HALF = Math.tan((FOV * 0.5) * Math.PI / 180);
+  var CAM_Z = 6.0;
+  var Z_NEAR = 4.3;   // 1.7 unit di depan lensa
+  var Z_FAR = -0.6;   // 6.6 unit dari lensa
+
+  var camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 60);
+  camera.position.set(0, 0, CAM_Z);
+  camera.lookAt(0, 0, 0);
+
+  var scene = new THREE.Scene();
+
+  /* ------------------------------------------------------------ uniform */
+  var U = {
+    uTime:    { value: 0 },
+    uTravel:  { value: 0 },
+    uGust:    { value: 0.35 },
+    uTanHalf: { value: TAN_HALF },
+    uAspect:  { value: 1 },
+    uHaze:    { value: 0.055 },
+    uSunDir:  { value: new THREE.Vector3(-0.52, 0.40, -0.75).normalize() },
+    uCore:    { value: new THREE.Color(0x0a1310) },
+    uMid:     { value: new THREE.Color(0x2a463d) },
+    uRim:     { value: new THREE.Color(0xbedad4) },
+    uWarm:    { value: new THREE.Color(0xd89a4a) },
+    uWarmRim: { value: new THREE.Color(0xffd8a0) }
+  };
+
+  /* ------------------------------------------------------------- shaders */
+  var LEAF_VERT = [
+    'precision highp float;',
+    '',
+    'attribute vec4 aAnchor;',   // x, y, z, drift speed
+    'attribute vec4 aSpin;',     // tumble speed, phase, axis tilt, scale
+    'attribute vec3 aBob;',      // amp, freq, phase
+    'attribute vec3 aLook;',     // warm, brightness, flex
+    '',
+    'uniform float uTime;',
+    'uniform float uTravel;',
+    'uniform float uGust;',
+    'uniform float uTanHalf;',
+    'uniform float uAspect;',
+    '',
+    'varying vec2  vLU;',
+    'varying vec3  vN;',
+    'varying vec3  vW;',
+    'varying float vDist;',
+    'varying float vWarm;',
+    'varying float vBright;',
+    'varying float vFlex;',
+    '',
+    'vec3 rotAxis(vec3 p, vec3 A, float th) {',
+    '  float c = cos(th);',
+    '  float s = sin(th);',
+    '  return p * c + cross(A, p) * s + A * dot(A, p) * (1.0 - c);',
+    '}',
+    '',
+    'void main() {',
+    '  float v = position.y;',
+    '  // v = 0 pangkal, 1 ujung',
+    '  float u = position.x * 2.0;',      // -0.5 .. 0.5
+    '',
+    '  float depth = max(cameraPosition.z - aAnchor.z, 0.9);',
+    '  float halfH = depth * uTanHalf;',
+    '  float halfW = halfH * uAspect;',
+    '',
+    '  // ---- kelenturan bilah: bergelombang dari pangkal ke ujung',
+    '  float flutter = sin(uTime * (0.90 + aBob.y * 1.15) + aBob.z * 6.2831 + v * 2.6 + aAnchor.x * 2.3);',
+    '  float flex = flutter * aLook.z * (0.20 + uGust * 0.34);',
+    '',
+    '  vec3 p = vec3(position.x, v, 0.0);',
+    '  p.z += flex * v * v * 1.6;',
+    '  p.y -= abs(flex) * 0.06 * v * v;',
+    '',
+    '  // ---- jungkir balik',
+    '  float ang = uTime * (0.24 + aSpin.x * 0.62) + aSpin.y * 6.2831;',
+    '  vec3 ax = normalize(vec3(sin(aSpin.z * 6.2831), cos(aSpin.z * 6.2831) * 0.62, 0.30));',
+    '  p = rotAxis(p, ax, ang);',
+    '',
+    '  vec3 n = normalize(vec3(0.0, -2.2 * flex * v, 1.0));',
+    '  n = rotAxis(n, ax, ang);',
+    '',
+    '  p *= aSpin.w;',
+    '',
+    '  // ---- hanyut mendatar, dibungkus tepat di luar tepi layar',
+    '  float spanX = (halfW + 0.32) * 1.02;',
+    '  float drift = uTravel * aAnchor.w;',
+    '  float px = mod(aAnchor.x + drift + spanX, spanX * 2.0) - spanX;',
+    '  float py = aAnchor.y',
+    '           + sin(uTime * aBob.y * 6.2831 + aBob.z * 6.2831) * aBob.x',
+    '           + uGust * aBob.x * 0.6;',
+    '',
+    '  vec3 world = p + vec3(px, py, aAnchor.z);',
+    '',
+    '  vec4 mv = viewMatrix * vec4(world, 1.0);',
+    '  gl_Position = projectionMatrix * mv;',
+    '',
+    '  vN = n;',
+    '  vW = world;',
+    '  vLU = vec2(v, u);',
+    '  vDist = length(cameraPosition - world);',
+    '  vWarm = aLook.x;',
+    '  vBright = aLook.y;',
+    '  vFlex = flex;',
+    '}'
+  ].join('\n');
+
+  var LEAF_FRAG = [
+    'precision highp float;',
+    '',
+    'uniform vec3  uSunDir;',
+    'uniform float uHaze;',
+    'uniform vec3  uCore;',
+    'uniform vec3  uMid;',
+    'uniform vec3  uRim;',
+    'uniform vec3  uWarm;',
+    'uniform vec3  uWarmRim;',
+    '',
+    'varying vec2  vLU;',
+    'varying vec3  vN;',
+    'varying vec3  vW;',
+    'varying float vDist;',
+    'varying float vWarm;',
+    'varying float vBright;',
+    'varying float vFlex;',
+    '',
+    'float leafHalf(float v) {',
+    '  v = clamp(v, 0.0, 1.0);',
+    '  float body = sin(pow(v, 0.80) * 3.14159265);',
+    '  body = pow(max(body, 0.0), 0.70);',
+    '  float stem = smoothstep(0.0, 0.17, v);',
+    '  float s = body * (0.40 + 0.60 * stem);',
+    '  s *= 1.0 + 0.055 * sin(v * 31.0 + 1.1);',
+    '  return 0.47 * s;',
+    '}',
+    '',
+    'float leafMid(float v) {',
+    '  return 0.055 * sin(clamp(v, 0.0, 1.0) * 2.2);',
+    '}',
+    '',
+    'void main() {',
+    '  float v  = vLU.x;',
+    '  float u  = vLU.y;',
+    '  float hw = leafHalf(v);',
+    '  float cx = leafMid(v);',
+    '  float d  = abs(u - cx);',
+    '',
+    '  float w = max(fwidth(d), 0.0014);',
+    '  float cov = clamp((hw - d) / w + 0.5, 0.0, 1.0);',
+    '  if (cov < 0.002) discard;',
+    '',
+    '  float dl = d / max(hw, 0.001);',
+    '',
+    '  vec3 N = normalize(vN);',
+    '  if (!gl_FrontFacing) N = -N;',
+    '  vec3 V = normalize(cameraPosition - vW);',
+    '',
+    '  float ndl  = dot(N, uSunDir);',
+    '  float lit  = clamp(ndl, 0.0, 1.0);',
+    '  float back = clamp(-ndl, 0.0, 1.0);',
+    '  float ahead = pow(clamp(dot(-V, uSunDir) * 0.5 + 0.5, 0.0, 1.0), 3.0);',
+    '  float trans = back * ahead;',
+    '',
+    '  float rib   = smoothstep(0.055, 0.0, d);',
+    '  float lat   = sin(v * 26.0 + dl * 3.4 + 1.0);',
+    '  float veins = smoothstep(0.78, 1.0, lat) * smoothstep(0.02, 0.34, dl) * 0.55;',
+    '  float edge  = smoothstep(0.58, 1.0, dl);',
+    '',
+    '  float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);',
+    '  vec3 col = mix(uCore, uMid, up * 0.9);',
+    '  col *= mix(0.84, 1.16, vBright);',
+    '',
+    '  col += uRim * (lit * 0.34 + trans * 1.20);',
+    '  col += uRim * rib * (0.10 + trans * 1.85);',
+    '  col += uRim * veins * trans * 1.35;',
+    '  col += uRim * edge * trans * 0.85;',
+    '',
+    '  vec3 wcol = uWarm * (0.30 + trans * 1.85 + lit * 0.40)',
+    '            + uWarmRim * (rib + veins * 0.6) * trans * 1.15;',
+    '  col = mix(col, wcol, vWarm);',
+    '',
+    '  float a = cov * exp(-uHaze * (vDist - 1.4));',
+    '',
+    '  gl_FragColor = vec4(col * a, a);',
+    '}'
+  ].join('\n');
+
+  /* --------------------------------------------------------------- daun */
+  var BOX_W = Math.max(1, host.clientWidth);
+  var BOX_H = Math.max(1, host.clientHeight);
+  var COUNT = (BOX_W < 700) ? 30 : 46;
+
+  var anchorArr = new Float32Array(COUNT * 4);
+  var spinArr   = new Float32Array(COUNT * 4);
+  var bobArr    = new Float32Array(COUNT * 3);
+  var lookArr   = new Float32Array(COUNT * 3);
+
+  var buildAspect = BOX_W / BOX_H;
+
+  for (var i = 0; i < COUNT; i++) {
+    var t = Math.pow(Math.random(), 0.9);
+    var z = Z_FAR + (Z_NEAR - Z_FAR) * t;
+    var depth = CAM_Z - z;
+    var halfH = depth * TAN_HALF;
+    var halfW = halfH * buildAspect;
+
+    var spanX = halfW + 0.32;
+    var depthN = t;                                   // 0 dekat .. 1 jauh
+
+    // ukuran konstan di layar, dengan sedikit bias jarak supaya ada rasa kedalaman
+    var frac = (0.014 + Math.random() * 0.016) * (1.12 - 0.26 * depthN);
+    var scale = frac * halfH * 2.0;
+
+    if (Math.random() < 0.075) {
+      var warm = 0.55 + Math.random() * 0.45;
+    } else {
+      warm = 0.0;
+    }
+
+    anchorArr[i * 4 + 0] = (Math.random() * 2 - 1) * spanX;
+    anchorArr[i * 4 + 1] = (Math.random() * 2 - 1) * (halfH + 0.06);
+    anchorArr[i * 4 + 2] = z;
+    anchorArr[i * 4 + 3] = 0.62 + Math.random() * 0.85;
+
+    spinArr[i * 4 + 0] = 0.30 + Math.random() * 1.05;
+    spinArr[i * 4 + 1] = Math.random();
+    spinArr[i * 4 + 2] = Math.random();
+    spinArr[i * 4 + 3] = scale;
+
+    bobArr[i * 3 + 0] = halfH * (0.05 + Math.random() * 0.11);
+    bobArr[i * 3 + 1] = 0.18 + Math.random() * 0.38;
+    bobArr[i * 3 + 2] = Math.random();
+
+    lookArr[i * 3 + 0] = warm;
+    lookArr[i * 3 + 1] = Math.random();
+    lookArr[i * 3 + 2] = 0.55 + Math.random() * 0.70;
+  }
+
+  var leafGeo = new THREE.PlaneGeometry(0.5, 1.0, 6, 16);
+  leafGeo.translate(0, 0.5, 0);
+  leafGeo.setAttribute('aAnchor', new THREE.InstancedBufferAttribute(anchorArr, 4));
+  leafGeo.setAttribute('aSpin',   new THREE.InstancedBufferAttribute(spinArr, 4));
+  leafGeo.setAttribute('aBob',    new THREE.InstancedBufferAttribute(bobArr, 3));
+  leafGeo.setAttribute('aLook',   new THREE.InstancedBufferAttribute(lookArr, 3));
+
+  var leafMat = new THREE.ShaderMaterial({
+    uniforms: U,
+    vertexShader: LEAF_VERT,
+    fragmentShader: LEAF_FRAG,
+    side: THREE.DoubleSide,
+    transparent: false,
+    depthTest: true,
+    depthWrite: true,
+    blending: THREE.NoBlending
+  });
+
+  var leaves = new THREE.InstancedMesh(leafGeo, leafMat, COUNT);
+  leaves.frustumCulled = false;
+  scene.add(leaves);
+
+  /* ---------------------------------------------------- jalur pasca-render */
+  var quadGeo = new THREE.PlaneGeometry(2, 2);
+  var quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  var quadScene = new THREE.Scene();
+  var quad = new THREE.Mesh(quadGeo, null);
+  quadScene.add(quad);
+
+  function blit(mat, target) {
+    quad.material = mat;
+    renderer.setRenderTarget(target || null);
+    renderer.render(quadScene, quadCam);
+  }
+
+  function makeRT(w, h, depth, samples) {
+    return new THREE.WebGLRenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: depth,
+      stencilBuffer: false,
+      samples: samples || 0
+    });
+  }
+
+  var VERT_QUAD = [
+    'varying vec2 vUv;',
+    'void main() {',
+    '  vUv = uv;',
+    '  gl_Position = vec4(position.xy, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+
+  // ---- satu pass komposit: latar foto + daun, tonemap, warna, grain
+  var finalMat = new THREE.ShaderMaterial({
+    uniforms: {
+      tLeaf:          { value: null },
+      tBg:            { value: null },
+      uHasBg:         { value: 0 },
+      uRes:           { value: new THREE.Vector2(1, 1) },
+      uImg:           { value: new THREE.Vector2(IMG_W, IMG_H) },
+      uFallTop:       { value: new THREE.Color(0xa3afbb) },
+      uFallBot:       { value: new THREE.Color(0x14181a) },
+      uExposure:      { value: 0.74 },
+      uGlow:          { value: 0.24 },
+      uContrast:      { value: 0.07 },
+      uSat:           { value: 1.06 },
+      uCA:            { value: 0.0024 },
+      uVig:           { value: 0.26 },
+      uGrain:         { value: 0.030 },
+      uSeed:          { value: 0 }
+    },
+    vertexShader: VERT_QUAD,
+    fragmentShader: [
+      'precision highp float;',
+      'varying vec2 vUv;',
+      'uniform sampler2D tLeaf;',
+      'uniform sampler2D tBg;',
+      'uniform float uHasBg;',
+      'uniform vec2  uRes;',
+      'uniform vec2  uImg;',
+      'uniform vec3  uFallTop;',
+      'uniform vec3  uFallBot;',
+      'uniform float uExposure;',
+      'uniform float uGlow;',
+      'uniform float uContrast;',
+      'uniform float uSat;',
+      'uniform float uCA;',
+      'uniform float uVig;',
+      'uniform float uGrain;',
+      'uniform float uSeed;',
+      '',
+      'vec3 aces(vec3 x) {',
+      '  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);',
+      '}',
+      'float hash21(vec2 p) {',
+      '  p = fract(p * vec2(123.34, 456.21));',
+      '  p += dot(p, p + 45.32);',
+      '  return fract(p.x * p.y);',
+      '}',
+      'vec3 toSRGB(vec3 c) {',
+      '  vec3 lo = c * 12.92;',
+      '  vec3 hi = 1.055 * pow(max(c, vec3(0.0)), vec3(0.41666)) - 0.055;',
+      '  return mix(lo, hi, step(vec3(0.0031308), c));',
+      '}',
+      '',
+      '// foto ditarik menutup penuh layar, tidak digepengkan',
+      'vec2 coverUV(vec2 uv) {',
+      '  float sa = uRes.x / uRes.y;',
+      '  float ia = uImg.x / uImg.y;',
+      '  vec2 sc = (sa > ia) ? vec2(1.0, ia / sa) : vec2(sa / ia, 1.0);',
+      '  return (uv - 0.5) * sc + 0.5;',
+      '}',
+      'vec3 bgAt(vec2 uv) {',
+      '  if (uHasBg > 0.5) return texture2D(tBg, coverUV(uv)).rgb;',
+      '  return mix(uFallBot, uFallTop, smoothstep(0.0, 1.0, coverUV(uv).y));',
+      '}',
+      '',
+      'void main() {',
+      '  vec2 d = vUv - 0.5;',
+      '  vec2 off = d * (uCA * dot(d, d) * 4.0);',
+      '',
+      '  // aberasi kromatik hanya di tepi, latar dan daun ikut',
+      '  vec3 bg = vec3(bgAt(vUv - off).r, bgAt(vUv).g, bgAt(vUv + off).b);',
+      '',
+      '  vec4 lf = texture2D(tLeaf, vUv);',
+      '  vec3 lc = vec3(',
+      '    texture2D(tLeaf, vUv - off).r,',
+      '    lf.g,',
+      '    texture2D(tLeaf, vUv + off).b',
+      '  );',
+      '',
+      '  // daun ditulis premultiplied, jadi cukup dijumlahkan',
+      '  float inv = 1.0 - lf.a;',
+      '  vec3 c = bg * inv + lc;',
+      '',
+      '  // pendar lembut di sekitar daun paling terang, cukup 9 tap',
+      '  vec2 px = 2.2 / uRes;',
+      '  vec3 glow = max(lf.rgb - 0.55, vec3(0.0)) * 0.5;',
+      '  glow += max(texture2D(tLeaf, vUv + vec2( px.x * 2.2, 0.0)).rgb - 0.55, vec3(0.0));',
+      '  glow += max(texture2D(tLeaf, vUv + vec2(-px.x * 2.2, 0.0)).rgb - 0.55, vec3(0.0));',
+      '  glow += max(texture2D(tLeaf, vUv + vec2(0.0,  px.y * 2.2)).rgb - 0.55, vec3(0.0));',
+      '  glow += max(texture2D(tLeaf, vUv + vec2(0.0, -px.y * 2.2)).rgb - 0.55, vec3(0.0));',
+      '  glow += max(texture2D(tLeaf, vUv + px * 5.0).rgb - 0.55, vec3(0.0)) * 0.55;',
+      '  glow += max(texture2D(tLeaf, vUv - px * 5.0).rgb - 0.55, vec3(0.0)) * 0.55;',
+      '  glow += max(texture2D(tLeaf, vUv + vec2(px.x, -px.y) * 5.0).rgb - 0.55, vec3(0.0)) * 0.55;',
+      '  glow += max(texture2D(tLeaf, vUv + vec2(-px.x, px.y) * 5.0).rgb - 0.55, vec3(0.0)) * 0.55;',
+      '  c += glow * uGlow;',
+      '',
+      '  c = aces(c * uExposure);',
+      '',
+      '  // kontras lembut di ruang 0..1',
+      '  c = mix(c, c * c * (3.0 - 2.0 * c), uContrast);',
+      '',
+      '  // split tone: bayangan dingin, sorotan hangat',
+      '  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));',
+      '  c = mix(c * vec3(0.94, 1.005, 1.055), c * vec3(1.045, 1.0, 0.945), smoothstep(0.18, 0.82, l));',
+      '',
+      '  float l2 = dot(c, vec3(0.2126, 0.7152, 0.0722));',
+      '  c = mix(vec3(l2), c, uSat);',
+      '',
+      '  float r = dot(d, d);',
+      '  float vig = mix(1.0, smoothstep(0.68, 0.10, r), uVig);',
+      '  c *= vig;',
+      '',
+      '  c = toSRGB(clamp(c, 0.0, 1.0));',
+      '',
+      '  // grain setelah encode: kalau sebelum, bayangan meledak jadi bintik',
+      '  float g = hash21(vUv * uRes + uSeed) - 0.5;',
+      '  c += g * uGrain;',
+      '',
+      '  gl_FragColor = vec4(c, 1.0);',
+      '}'
+    ].join('\n'),
+    depthTest: false, depthWrite: false
+  });
+
+  /* -------------------------------------------------------------- ukuran */
+  var leafRT;
+  var PW = 1, PH = 1;
+
+  function resize() {
+    var w = Math.max(1, host.clientWidth);
+    var h = Math.max(1, host.clientHeight);
+
+    renderer.setPixelRatio(DPR);
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    PW = Math.max(2, Math.floor(w * DPR));
+    PH = Math.max(2, Math.floor(h * DPR));
+
+    if (!leafRT) {
+      leafRT = makeRT(PW, PH, true, DPR > 1 ? 0 : 4);
+      finalMat.uniforms.tLeaf.value = leafRT.texture;
+    } else {
+      leafRT.setSize(PW, PH);
+    }
+
+    U.uAspect.value = w / h;
+    finalMat.uniforms.uRes.value.set(PW, PH);
+  }
+
+  resize();
+  window.addEventListener('resize', resize);
+  if (window.ResizeObserver) { new ResizeObserver(resize).observe(host); }
+
+  /* ----------------------------------------------------------- latar foto */
+  var bgTex = null;
+
+  new THREE.TextureLoader().load(
+    BG_URL,
+    function (tex) {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = true;
+      tex.anisotropy = 4;
+      tex.needsUpdate = true;
+      bgTex = tex;
+      finalMat.uniforms.tBg.value = tex;
+      finalMat.uniforms.uImg.value.set(tex.image.width, tex.image.height);
+      finalMat.uniforms.uHasBg.value = 1;
+      begin();
+    },
+    undefined,
+    function () {
+      // lewat file:// Chrome memblokir tekstur lokal karena CORS. Daripada
+      // menampilkan gradasi palsu, kanvas dimatikan dan foto CSS di
+      // belakangnya yang tampil (tanpa daun).
+      var c = document.getElementById('stage');
+      if (c) c.style.display = 'none';
+      if (window.console) {
+        console.warn('[hero] background1.jpg tidak bisa dibaca (CORS di file://). ' +
+          'Jalankan python -m http.server 8000 lalu buka lewat localhost.');
+      }
+    }
+  );
+
+  /* --------------------------------------------------------------- angin */
+  // Tidak ada interaksi. Kanvas memakai pointer-events: none, jadi klik di
+  // area ini harus sampai ke tautan di atasnya. Angin murni ambient.
+
+
+  /* ---------------------------------------------------------------- loop */
+  var started = false;
+  var clock = new THREE.Clock();
+  var time = 0;
+  var travel = 0;
+  var frameCount = 0;
+  var frameAccum = 0;
+  var degraded = false;
+  // tangkapan layar otomatis jangan ikut menurunkan mutu
+  var AUTOMATED = !!navigator.webdriver;
+
+  var running = false;      // hero terlihat DAN tab aktif
+  var rafId = 0;
+  var onScreen = false;
+
+  function wind(t) {
+    var g = 0.34
+      + 0.26 * Math.sin(t * 0.23 + 0.7)
+      + 0.16 * Math.sin(t * 0.61 + 2.1)
+      + 0.09 * Math.sin(t * 1.13 + 0.4);
+    return Math.max(0.0, Math.min(1.2, g));
+  }
+
+  // advance = false berarti gambar ulang di frame yang sama. Dipakai saat
+  // menyalakan ulang, saat resize, dan saat reduced-motion: tidak ada
+  // lompatan waktu.
+  function draw(dt, advance) {
+    if (advance) {
+      time += dt;
+      travel += dt * (0.22 + wind(time) * 0.42);
+    }
+
+    var g = wind(time);
+    U.uGust.value = g;
+    U.uTime.value = time;
+    U.uTravel.value = travel;
+    finalMat.uniforms.uSeed.value = (time * 57.63) % 311.0;
+
+    // 1. daun saja, latar transparan
+    renderer.setRenderTarget(leafRT);
+    renderer.render(scene, camera);
+    // 2. komposit dengan foto, lalu tampil
+    blit(finalMat, null);
+  }
+
+  function frame() {
+    rafId = 0;
+    var dt = Math.min(clock.getDelta(), 0.05);
+
+    draw(dt, true);
+
+    // ---- ukur, turunkan mutu sekali bila perlu
+    if (!degraded && !AUTOMATED) {
+      frameAccum += dt;
+      frameCount++;
+      if (frameCount >= 90) {
+        if (frameAccum / frameCount > 0.030) {
+          degraded = true;
+          DPR = Math.max(1, DPR * 0.72);
+          resize();
+          draw(0, false);
+        }
+        frameAccum = 0;
+        frameCount = 0;
+      }
+    }
+
+    if (running) rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (running || !started) return;
+    running = true;
+    clock.getDelta();          // buang jeda; dt berikutnya tetap kecil
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function stop() {
+    running = false;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  }
+
+  function sync() {
+    if (onScreen && !document.hidden) start(); else stop();
+  }
+
+  if (window.IntersectionObserver) {
+    new IntersectionObserver(function (entries) {
+      onScreen = entries[0].isIntersecting;
+      sync();
+    }, { threshold: 0 }).observe(host);
+  } else {
+    onScreen = true;
+  }
+
+  document.addEventListener('visibilitychange', sync);
+
+  function begin() {
+    if (started) return;
+    started = true;
+    clock.start();
+
+    // satu frame diam dulu, supaya kanvas muncul sudah berisi
+    draw(0, false);
+    canvas.classList.add('is-ready');
+
+    // reduced-motion: foto dan daun tetap ada, geraknya yang berhenti
+    if (REDUCED) return;
+
+    start();
+  }
+
+  canvas.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault();
+    stop();
+    canvas.style.display = 'none';
+  }, false);
+
+  // saat berhenti, resize tidak digambar ulang oleh loop â€” lakukan manual
+  window.addEventListener('resize', function () {
+    if (started && !running) draw(0, false);
+  });
+
+  // jaring pengaman: jangan menggantung kalau foto lambat terbaca
+  setTimeout(function () { if (!started) begin(); }, 2600);
+})();</script>
+</body>
+</html>
